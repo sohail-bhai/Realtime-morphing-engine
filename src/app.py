@@ -33,12 +33,10 @@ class FpsMeter:
 class RubberFaceApp:
     """Main realtime app loop.
 
-    v2.1 upgrades:
-    - index fingertip is used as the drag point
-    - mouth anchor locks once pinch starts near the mouth
-    - target point is smoothed for less jitter
-    - release fades out instead of snapping instantly
-    - warp ROI expands toward the finger, making the effect much more visible
+    v2.2 fixes:
+    - camera resolution is native by default instead of forcing 16:9
+    - preview window fits the screen without cropping the real frame
+    - morph uses a cleaner local face-only deformation, not a transparent streak to the finger
     """
 
     def __init__(self, cfg: AppConfig):
@@ -62,10 +60,11 @@ class RubberFaceApp:
         self.strength = cfg.strength
         self.last_message = ""
         self.last_message_until = 0.0
+        self.window_initialized = False
 
     def run(self) -> int:
         cap = self._open_camera()
-        window_name = "RubberFace AR v2.1 - MediaPipe Tasks"
+        window_name = "Realtime Morphing Engine - MediaPipe Tasks"
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
 
         try:
@@ -78,6 +77,11 @@ class RubberFaceApp:
                 if self.mirror:
                     frame = cv2.flip(frame, 1)
 
+                if not self.window_initialized:
+                    self._print_camera_info(cap, frame)
+                    self._fit_window_to_frame(window_name, frame)
+                    self.window_initialized = True
+
                 timestamp_ms = int(time.monotonic() * 1000)
                 fps = self.fps_meter.update()
 
@@ -89,7 +93,8 @@ class RubberFaceApp:
                     print(f"Runtime error: {exc}", file=sys.stderr)
 
                 self.recorder.write(output)
-                cv2.imshow(window_name, output)
+                preview = self._make_preview(output)
+                cv2.imshow(window_name, preview)
 
                 key = cv2.waitKey(1) & 0xFF
                 if not self._handle_key(key, output, fps):
@@ -113,11 +118,37 @@ class RubberFaceApp:
                 "Try: python main.py --camera 1\n"
                 "Also check Windows camera privacy permission."
             )
-        if self.cfg.width > 0:
+
+        # Only force resolution if the user explicitly passes width and height.
+        # This prevents 4:3 webcams from being stretched/cropped into 16:9.
+        if self.cfg.width > 0 and self.cfg.height > 0:
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.cfg.width)
-        if self.cfg.height > 0:
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.cfg.height)
         return cap
+
+    def _print_camera_info(self, cap: cv2.VideoCapture, frame) -> None:
+        h, w = frame.shape[:2]
+        reported_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        reported_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        print(f"Camera frame: {w}x{h} | reported: {reported_w}x{reported_h}")
+        if self.cfg.width <= 0 or self.cfg.height <= 0:
+            print("Resolution mode: native camera frame. To force one, use: python main.py --width 1280 --height 720")
+
+    def _fit_window_to_frame(self, window_name: str, frame) -> None:
+        h, w = frame.shape[:2]
+        scale = min(self.cfg.max_display_width / max(w, 1), self.cfg.max_display_height / max(h, 1), 1.0)
+        display_w = max(320, int(w * scale))
+        display_h = max(240, int(h * scale))
+        cv2.resizeWindow(window_name, display_w, display_h)
+
+    def _make_preview(self, frame):
+        h, w = frame.shape[:2]
+        scale = min(self.cfg.max_display_width / max(w, 1), self.cfg.max_display_height / max(h, 1), 1.0)
+        if scale >= 0.999:
+            return frame
+        display_w = max(320, int(w * scale))
+        display_h = max(240, int(h * scale))
+        return cv2.resize(frame, (display_w, display_h), interpolation=cv2.INTER_AREA)
 
     def _process_frame(self, frame, timestamp_ms: int, fps: float):
         height, width = frame.shape[:2]
@@ -130,7 +161,10 @@ class RubberFaceApp:
         if mouth and pinch.is_pinching and pinch.point:
             self._update_drag_state(mouth, pinch)
             if self.active_anchor and self.smoothed_target:
-                self.pull_length = hypot(self.smoothed_target[0] - self.active_anchor[0], self.smoothed_target[1] - self.active_anchor[1])
+                self.pull_length = hypot(
+                    self.smoothed_target[0] - self.active_anchor[0],
+                    self.smoothed_target[1] - self.active_anchor[1],
+                )
                 output = apply_elastic_mouth_pull(
                     output,
                     mouth=mouth,
@@ -172,8 +206,6 @@ class RubberFaceApp:
         self.release_decay_value = 0.0
         self.release_target = None
 
-        # Lock the closest anchor only once per drag. If the user starts pinching away
-        # from the mouth, we wait until the pinched fingertip comes near the mouth.
         if self.active_anchor is None:
             if not mouth.is_near(point):
                 self.smoothed_target = point
@@ -188,7 +220,6 @@ class RubberFaceApp:
             self.smoothed_target = point
             return
 
-        # Smoothing: responsive but not shaky.
         a = max(0.05, min(0.95, self.cfg.target_smoothing))
         self.smoothed_target = (
             self.smoothed_target[0] * (1.0 - a) + point[0] * a,
@@ -250,7 +281,7 @@ class RubberFaceApp:
             self.mirror = not self.mirror
         elif key in (ord("r"), ord("R")):
             self._clear_drag_if_dead(force=True)
-            self._flash("Stretch reset")
+            self._flash("Morph reset")
         elif key in (ord("s"), ord("S")):
             path = save_screenshot(frame)
             self._flash(f"Screenshot saved: {path.name}")
@@ -275,15 +306,27 @@ class RubberFaceApp:
 
     def _draw_flash_message(self, frame) -> None:
         if self.last_message and time.perf_counter() < self.last_message_until:
-            put_text(frame, self.last_message, 112, (50, 255, 255))
+            put_text(frame, self.last_message, 104, (50, 255, 255))
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="RubberFace AR v2.1 - stronger MediaPipe Tasks mouth stretch filter")
+    parser = argparse.ArgumentParser(description="Realtime Morphing Engine - MediaPipe Tasks")
     parser.add_argument("--camera", type=int, default=0, help="Camera index. Try 1 if 0 does not work.")
-    parser.add_argument("--width", type=int, default=960, help="Requested camera width. Use 640 or 720 for faster speed.")
-    parser.add_argument("--height", type=int, default=540, help="Requested camera height.")
-    parser.add_argument("--strength", type=float, default=1.15, help="Stretch strength, e.g. 0.8 to 1.8.")
+    parser.add_argument(
+        "--width",
+        type=int,
+        default=0,
+        help="Requested camera width. Default 0 means use native camera resolution.",
+    )
+    parser.add_argument(
+        "--height",
+        type=int,
+        default=0,
+        help="Requested camera height. Default 0 means use native camera resolution.",
+    )
+    parser.add_argument("--max-display-width", type=int, default=1280, help="Maximum preview window width.")
+    parser.add_argument("--max-display-height", type=int, default=720, help="Maximum preview window height.")
+    parser.add_argument("--strength", type=float, default=1.10, help="Morph strength, e.g. 0.8 to 1.8.")
     parser.add_argument("--no-mirror", action="store_true", help="Disable mirror view.")
     parser.add_argument("--no-debug", action="store_true", help="Start without debug overlay.")
     parser.add_argument("--landmarks", action="store_true", help="Draw selected face/hand landmarks.")
@@ -296,6 +339,8 @@ def main() -> int:
         camera_index=args.camera,
         width=args.width,
         height=args.height,
+        max_display_width=args.max_display_width,
+        max_display_height=args.max_display_height,
         mirror=not args.no_mirror,
         strength=args.strength,
         debug=not args.no_debug,

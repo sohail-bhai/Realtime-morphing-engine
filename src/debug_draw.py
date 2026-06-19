@@ -12,15 +12,35 @@ _FACE_MOUTH_INDICES = [61, 291, 13, 14, 0, 17, 37, 267, 39, 269, 40, 270, 185, 4
 _HAND_IMPORTANT_INDICES = [0, 4, 5, 8, 9, 12, 17, 20]
 
 
-def put_text(frame: np.ndarray, text: str, y: int, color: tuple[int, int, int] = (245, 245, 245)) -> None:
-    cv2.putText(frame, text, (16, y), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 0, 0), 4, cv2.LINE_AA)
-    cv2.putText(frame, text, (16, y), cv2.FONT_HERSHEY_SIMPLEX, 0.58, color, 1, cv2.LINE_AA)
+def put_text(
+    frame: np.ndarray,
+    text: str,
+    y: int,
+    color: tuple[int, int, int] = (245, 245, 245),
+    x: int = 14,
+    scale: float = 0.52,
+    thickness: int = 1,
+) -> None:
+    cv2.putText(frame, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, (0, 0, 0), thickness + 3, cv2.LINE_AA)
+    cv2.putText(frame, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness, cv2.LINE_AA)
 
 
 def _draw_cross(frame: np.ndarray, point: tuple[float, float], color: tuple[int, int, int]) -> None:
     x, y = int(point[0]), int(point[1])
     cv2.line(frame, (x - 8, y), (x + 8, y), color, 2, cv2.LINE_AA)
     cv2.line(frame, (x, y - 8), (x, y + 8), color, 2, cv2.LINE_AA)
+
+
+def _short_anchor_name(name: str | None) -> str:
+    if not name:
+        return "none"
+    return {
+        "left_corner": "left",
+        "right_corner": "right",
+        "upper_lip": "upper",
+        "lower_lip": "lower",
+        "center": "center",
+    }.get(name, name)
 
 
 def draw_overlay(
@@ -41,27 +61,28 @@ def draw_overlay(
 ) -> None:
     status_color = (0, 230, 0) if pinch.is_pinching else (80, 80, 255)
     if active_anchor and pinch.is_pinching:
-        state = "LOCKED+STRETCH"
+        state = "MORPH"
     elif active_anchor and release_decay > 0.05:
-        state = "RELEASE_SMOOTH"
+        state = "RESET"
     elif pinch.is_pinching:
-        state = "PINCH_NEAR_MOUTH"
+        state = "PINCH"
     else:
         state = "idle"
 
-    anchor_label = active_anchor_name or "none"
-    put_text(frame, f"RubberFace AR v2.1 | Tasks API | FPS {fps:04.1f}", 28)
+    anchor_label = _short_anchor_name(active_anchor_name)
+
+    put_text(frame, f"Realtime Morphing Engine | FPS {fps:04.1f}", 26)
     put_text(
         frame,
         f"face={tracking.face_count} hand={tracking.hand_count} pinch={'ON' if pinch.is_pinching else 'OFF'} "
         f"ratio={pinch.raw_ratio:.2f} state={state}",
-        56,
+        52,
         status_color,
     )
     put_text(
         frame,
-        f"anchor={anchor_label} pull={pull_length:.0f}px strength={strength:.2f} recording={'ON' if recording else 'OFF'}",
-        84,
+        f"anchor={anchor_label} pull={pull_length:.0f}px strength={strength:.2f} rec={'ON' if recording else 'OFF'}",
+        78,
         (0, 0, 255) if recording else (245, 245, 245),
     )
 
@@ -114,10 +135,11 @@ def draw_overlay(
                     cv2.circle(frame, (int(x), int(y)), 3, (0, 255, 0), -1)
 
     if show_help:
+        # Compact help so it does not get cut on 640/720 width camera frames.
         help_lines = [
-            "Q/Esc quit | D debug | L landmarks | R reset | S screenshot | V record",
-            "+/- strength | M mirror | H help | tip: pinch FIRST, then drag from mouth",
+            "Q quit | D debug | L dots | R reset | S shot | V rec",
+            "+/- strength | M mirror | H help | pinch near mouth, then drag",
         ]
-        base_y = frame.shape[0] - 44
+        base_y = max(24, frame.shape[0] - 42)
         for i, line in enumerate(help_lines):
-            put_text(frame, line, base_y + i * 22, (220, 220, 220))
+            put_text(frame, line, base_y + i * 20, (220, 220, 220), scale=0.48)
