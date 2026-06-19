@@ -16,6 +16,8 @@ class MouthRegion:
     bbox: tuple[int, int, int, int]
     width: float
     height: float
+    lip_gap: float
+    open_ratio: float
     near_radius: float
 
     def anchors(self) -> dict[str, tuple[float, float]]:
@@ -27,31 +29,19 @@ class MouthRegion:
             "center": self.center,
         }
 
+    def is_open_for_teeth_stretch(self) -> bool:
+        """True when the mouth is open enough to sample visible inner-mouth/teeth texture."""
+        return self.open_ratio >= 0.115 and self.lip_gap >= max(6.0, self.width * 0.085)
+
     def choose_anchor(self, point: tuple[float, float]) -> tuple[str, tuple[float, float]]:
-        """Pick the nearest useful mouth anchor.
+        """For Luffy-style pulling, lock only left/right corner.
 
-        v2.1 improvement: older version only chose left/right side based on x.
-        This version supports upper/lower lip and center pulls too.
+        The x/y position of this anchor is refreshed every frame by app.py, so the
+        effect follows the moving face instead of using an old frozen coordinate.
         """
-        best_name = "center"
-        best_point = self.center
-        best_score = float("inf")
-        for name, anchor in self.anchors().items():
-            dx = point[0] - anchor[0]
-            dy = point[1] - anchor[1]
-            score = dx * dx + dy * dy
-
-            # Small bias toward corners because side pulling is the main effect.
-            if name in {"left_corner", "right_corner"}:
-                score *= 0.78
-            elif name == "center":
-                score *= 1.25
-
-            if score < best_score:
-                best_score = score
-                best_name = name
-                best_point = anchor
-        return best_name, best_point
+        if point[0] < self.center[0]:
+            return "left_corner", self.left_corner
+        return "right_corner", self.right_corner
 
     def is_near(self, point: tuple[float, float]) -> bool:
         return hypot(point[0] - self.center[0], point[1] - self.center[1]) <= self.near_radius
@@ -67,7 +57,7 @@ def _mid(a: tuple[float, float], b: tuple[float, float]) -> tuple[float, float]:
 
 
 def build_mouth_region(face_landmarks: list[tuple[float, float, float]] | None, frame_width: int, frame_height: int) -> MouthRegion | None:
-    """Extract a robust mouth/cheek region from Face Landmarker points."""
+    """Extract mouth landmarks and mouth-open measurements from MediaPipe Face Landmarker."""
     if not face_landmarks or len(face_landmarks) < 292:
         return None
 
@@ -76,8 +66,6 @@ def build_mouth_region(face_landmarks: list[tuple[float, float, float]] | None, 
     upper = _xy(face_landmarks, 13)
     lower = _xy(face_landmarks, 14)
 
-    # Cheek-side helper anchors make the deformation area bigger and more natural.
-    # These are not used directly as latch anchors yet, but they expand the ROI.
     left_cheek = _mid(_xy(face_landmarks, 50), _xy(face_landmarks, 207)) if len(face_landmarks) > 207 else left
     right_cheek = _mid(_xy(face_landmarks, 280), _xy(face_landmarks, 427)) if len(face_landmarks) > 427 else right
 
@@ -86,18 +74,22 @@ def build_mouth_region(face_landmarks: list[tuple[float, float, float]] | None, 
         (left[1] + right[1] + upper[1] + lower[1]) * 0.25,
     )
     width = max(30.0, hypot(right[0] - left[0], right[1] - left[1]))
-    lip_gap = max(8.0, hypot(lower[0] - upper[0], lower[1] - upper[1]))
-    height = max(width * 0.50, lip_gap * 5.0)
+    lip_gap = max(1.0, hypot(lower[0] - upper[0], lower[1] - upper[1]))
+    open_ratio = lip_gap / max(width, 1.0)
 
-    # v2.1: slightly larger base ROI. The warp function expands it further toward the finger.
-    pad_x = width * 1.45
-    pad_y_top = height * 1.00
-    pad_y_bottom = height * 1.15
+    # height is only a broad mouth-area measure. The actual stretch strip uses lip_gap.
+    height = max(width * 0.34, lip_gap * 2.15, 18.0)
 
-    x1 = max(0, int(center[0] - pad_x))
-    x2 = min(frame_width - 1, int(center[0] + pad_x))
-    y1 = max(0, int(center[1] - pad_y_top))
-    y2 = min(frame_height - 1, int(center[1] + pad_y_bottom))
+    xs = [left[0], right[0], upper[0], lower[0], left_cheek[0], right_cheek[0]]
+    ys = [left[1], right[1], upper[1], lower[1], left_cheek[1], right_cheek[1]]
+
+    pad_x = width * 0.78
+    pad_y = height * 1.05
+
+    x1 = max(0, int(min(xs) - pad_x))
+    y1 = max(0, int(min(ys) - pad_y))
+    x2 = min(frame_width - 1, int(max(xs) + pad_x))
+    y2 = min(frame_height - 1, int(max(ys) + pad_y))
 
     return MouthRegion(
         center=center,
@@ -110,5 +102,7 @@ def build_mouth_region(face_landmarks: list[tuple[float, float, float]] | None, 
         bbox=(x1, y1, x2, y2),
         width=width,
         height=height,
-        near_radius=width * 3.15,
+        lip_gap=lip_gap,
+        open_ratio=open_ratio,
+        near_radius=width * 3.20,
     )

@@ -12,7 +12,7 @@ from src.warp import run_offline_warp_test
 
 def main() -> int:
     SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
-    output_path = SCREENSHOT_DIR / "v2_1_offline_warper_test.png"
+    output_path = SCREENSHOT_DIR / "v2_9_texture_ribbon_test.png"
     run_offline_warp_test(str(output_path))
     print(f"Saved offline warp test: {output_path}")
     return 0
